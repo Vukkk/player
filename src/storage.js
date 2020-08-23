@@ -1,9 +1,10 @@
 let localStorage;
+let sessionStorage;
 
 try {
   localStorage = window.localStorage;
-} catch(e) {
-}
+  sessionStorage = window.sessionStorage;
+} catch(e) {}
 
 export function localStorageGetItem(key) {
   try {
@@ -16,11 +17,39 @@ export function localStorageGetItem(key) {
 export function localStorageRemoveItem(key) {
   try {
     localStorage.removeItem(key);
-  } catch (e) {}
+  } catch (e) {
+    return null;
+  }
 }
 
 export function localStorageSetItem(key, value) {
   try {
     return localStorage.setItem(key, value);
-  } catch (e) {}
+  } catch (e) {
+    return null;
+  }
+}
+
+export function sessionStorageGetItem(key) {
+  try {
+    return sessionStorage.getItem(key);
+  } catch (e) {
+    return null;
+  }
+}
+
+export function sessionStorageRemoveItem(key) {
+  try {
+    sessionStorage.removeItem(key);
+  } catch (e) {
+    return null;
+  }
+}
+
+export function sessionStorageSetItem(key, value) {
+  try {
+    return sessionStorage.setItem(key, value);
+  } catch (e) {
+    return null;
+  }
 }

@@ -1,358 +1,300 @@
-require('!style-loader!css-loader!./css/settings.css')
-require('!style-loader!css-loader!video.js/dist/video-js.css')
-require('!style-loader!css-loader!./css/player.css')
-require('!style-loader!css-loader!./css/videojs-logobrand.css')
-require('!style-loader!css-loader!./css/videojs-chromecast.css')
-require('!style-loader!css-loader!./css/login.css')
-import logo from '../dist/assets/patreon.png';
-import videojs from 'video.js';
-window.videojs = videojs;
-import React from 'react';
-import hlsjs from 'videojs-hlsjs-plugin';
-hlsjs.register(videojs);
+import React, { Component } from 'react';
+import Hls from 'hls.js';
 import canAutoplay from 'can-autoplay';
-import './settings/videostats-ul';
-import './settings/settings-menu-button';
-import './settings/vjs-quality-picker';
-require('./videojs-chromecast');
-require('./videojs-logobrand');
-require('./videojs-persistvolume');
-import io from 'socket.io-client';
-import feathers from '@feathersjs/client';
-import 'videojs-hotkeys';
-import { localStorageGetItem, localStorageSetItem } from './storage';
+import { localStorageGetItem, localStorageSetItem, sessionStorageGetItem, sessionStorageSetItem } from './storage';
 
-/*TODO: 
-    When offline, change back to offline background img? Or use a div overlay for offline image when offline.
-    show first frame as poster if live. if not live, show user's poster
- */
+class Player extends Component {
+  constructor(props) {
+    super(props);
 
-export default class VideoPlayer extends React.Component {
+    this.state = {
+      live: this.props.type === 'live',
+      server: this.props.server,
+      muted: JSON.parse(localStorageGetItem('muted')),
+      bestRegion: sessionStorageGetItem('bestRegion') || this.props.region
+    };
+  }
 
-    constructor(props) {
-        super(props);
-    }
-
-    componentDidMount() {
-        this.player = videojs(this.videoNode, this.props.options, () => {
-        });
-
-        const player = this.player;
-
-        canAutoplay.video().then(function(obj) {
-            if (obj.result === false) {
-                player.muted(true);
-            }
-        });
-
-        player.logobrand({
-            image: logo,
-            destination: "https://www.patreon.com/join/angelthump"
-        });
-        player.persistvolume({
-            namespace: "volume"
-        });
-        player.VideoStatsUL.hide();
-        player.qualityPickerPlugin();
-
-        player.hotkeys({
-            volumeStep: 0.1,
-            rewindKey: () => {
-                return null;
-            },
-            forwardKey: () => {
-                return null;
-            },
-            enableModifiersForNumbers: false,
-            enableNumbers: false,
-            enableHoverScroll: true
-        });
-
-        let { data, channel, server } = this.props;
-        if(data) {
-            let { user, thumbnail_url, transcodeReady } = data;
-            let live = data.type === 'live';
-            let offline_banner_url = user.offline_banner_url;
-            let viewCountSocket, requestTime = 1000;
-            let patreon = JSON.parse(localStorageGetItem('patreon')) || false;
-
-            let viewCountApiConnect = () => {
-                viewCountSocket = new WebSocket('wss://viewer-api.angelthump.com/uws/');
-                viewCountSocket.onopen = () => {
-                    viewCountSocket.send(JSON.stringify({action: 'subscribe', channel: channel}));
-                    if(!player.paused() && live) {
-                        viewCountSocket.send(JSON.stringify({action: 'join', channel: channel}));
-                    }
-                    setInterval(() => {
-                        viewCountSocket.send('{}');
-                    }, 10 * 1000)
-                };
-
-                viewCountSocket.onmessage = (message) => {
-                    const jsonObject = JSON.parse(message.data);
-                    switch (jsonObject.action) {
-                        case 'reload': {
-                            window.location.reload();
-                        }
-                        case 'redirect': {
-                            window.location.search = `?channel=${jsonObject.punt_username}`;
-                        }
-                        case 'live': {
-                            console.log("socket sent live: " + jsonObject.live);
-                            live = jsonObject.live;
-                            if(live) {
-                                setTimeout(function() {
-                                    retry();
-                                }, 3000);
-                            }
-                        }
-                    }
-                };
-
-                viewCountSocket.onclose = function(e) {
-                    if(e.code === 1008) {
-                        return console.error(e.reason);
-                    }
-                    console.log('Trying to reconnect to view count ws.', e.reason);
-                    setTimeout(function() {
-                        viewCountApiConnect();
-                    }, 5000);
-                };
-            }
-
-            if(!viewCountSocket) {
-                viewCountApiConnect();
-            }
-
-            player.bigPlayButton.hide();
-            if(!live) {
-                player.poster(offline_banner_url);
-            } else {
-                setTimeout(function() {
-                    player.poster(offline_banner_url);
-                }, 5000);
-            }
-
-            player.on("pause", () => {
-                player.bigPlayButton.show();
-                document.getElementById('paused-overlay').style.visibility='visible';
-
-                
-                if(viewCountSocket.readyState === 1) {
-                    viewCountSocket.send(JSON.stringify({action: 'leave', channel: channel}));
-                }
-            })
-
-            player.on("playing", () => {
-                const hlsTech = player.tech({IWillNotUseThisInPlugins: true}).hls;
-                //console.log(hlsTech);
-                //console.log(hlsTech.liveSyncPosition);
-                player.loadingSpinner.show();
-                player.bigPlayButton.hide();
-                document.getElementById('paused-overlay').style.visibility='hidden';
-                player.poster(offline_banner_url);
-
-                if(viewCountSocket.readyState === 1) {
-                    viewCountSocket.send(JSON.stringify({action: 'join', channel: channel}));
-                }
-            })
-
-            player.on('error', () => {
-                const error = player.error();
-                if(viewCountSocket.readyState === 1) {
-                    viewCountSocket.send(JSON.stringify({action: 'leave', channel: channel}));
-                }
-
-                player.loadingSpinner.hide();
-                if(error.code != 3) {
-                    player.error(null);
-                    if(live) {
-                        console.log('might be trying to change server');
-                        fetch(`https://vigor.angelthump.com/${channel}/edge`)
-                        .then(response => response.json())
-                        .then(response => {
-                            if(server !== response.server) {
-                                server = response.server;
-                                return player.trigger('public');
-                            }
-                        })
-                        .catch(() => {
-                            console.error('failed to get m3u8 server');
-                        });
-                        
-                        retry();
-                    }
-                }
-            })
-
-            player.on('patreon', () => {
-                const auth = io("https://sso.angelthump.com");
-
-                const app = feathers()
-                .configure(feathers.socketio(auth))
-                .configure(feathers.authentication());
-
-                app.reAuthenticate()
-                .then(async () => {
-                    const {user} = await app.get('authentication');
-                    if(!user.patreon && user.angel) {
-                        alert("You do not have patreon linked to your account!");
-                        alert("You are not a patron! If you are, did you link your account?");
-                        document.getElementById('patreon-toggle').checked = false;
-                        localStorageSetItem('patreon', false);
-                        window.open('https://angelthump.com/dashboard/patreon', 'AngelThump x Patreon','height=640,width=960,menubar=no,scrollbars=no,location=no,status=no');
-                        return;
-                    }
-                  
-                    let isPatron, tier;
-                    if(!user.patreon) {
-                        isPatron = false;
-                        tier = 0;
-                    } else {
-                        isPatron = user.patreon.isPatron;
-                        tier = user.patreon.tier;
-                    }
-                  
-                    if(!user.angel && !isPatron && tier === 0) {
-                        alert("You are not a patron! If you are, did you verify your patreon?");
-                        document.getElementById('patreon-toggle').checked = false;
-                        localStorageSetItem('patreon', false);
-                        window.open('https://angelthump.com/settings/connection', 'AngelThump x Patreon','height=640,width=960,menubar=no,scrollbars=no,location=no,status=no');
-                        return;
-                    }
-
-                    //hide logo
-                    document.getElementById('vjs-logobrand-image').style.visibility = 'hidden';
-                    if(transcodeReady) {
-                        player.src({
-                            type: "application/x-mpegURL",
-                            src: `https://video-patreon-cdn.angelthump.com/hls/${channel}.m3u8`
-                        })
-                    } else {
-                        player.src({
-                            type: "application/x-mpegURL",
-                            src: `https://video-patreon-cdn.angelthump.com/hls/${channel}/index.m3u8`
-                        })
-                    }
-                    player.play();
-                    auth.disconnect();
-                }).catch(function(error){
-                    console.error('Error authenticating!', error);
-
-                    let loginPage = document.createElement('div');
-                    loginPage.setAttribute('class', 'login-page');
-                    loginPage.innerHTML = "<a href='/'><img src='/assets/small_logo.png'></a><div class='error' id='error' style='display: none; text-align: center;'>Wrong Username/Password! Please try again!</div><div class='form'><form id='loginForm' class='login-form' onsubmit='return false'><input id='strategy' type='hidden' name='strategy' value='local'><input id='user' type='user' name='user' placeholder='username' autocomplete='off'><input id='password' type='password' name='password' placeholder='password' autocomplete='off'><button type='submit' id='login'>login</button></form></div>"
-
-                    const modalOptions = {
-                        content: loginPage
-                    };
-
-                    const ModalDialog = videojs.getComponent('ModalDialog');
-                    const loginModal = new ModalDialog(player, modalOptions);
-
-                    player.addChild(loginModal);
-                    loginModal.open();
-
-                    const getCredentials = () => {
-                        var payload;
-                        var user = {
-                            username: document.getElementById('user').value,
-                            password: document.getElementById('password').value
-                        };
-                        payload = user ? Object.assign({ strategy: 'local' }, user) : {};
-                        return payload;
-                    }
-
-                    const login = async (payload) => {
-                        await app.authenticate(payload)
-                        .then(() => {
-                            loginModal.close();
-                            player.trigger('patreon');
-                            document.getElementById('patreon-toggle').checked = true;
-                            localStorageSetItem('patreon', true);
-                        }).catch(function(error) {
-                            document.getElementById("error").style.display = 'block';
-                            console.error('Error authenticating!', error);
-                        });
-                        auth.disconnect();
-                    }
-
-                    document.getElementById("login").addEventListener("click", () => {
-                        login(getCredentials());
-                    });
-
-                    document.getElementById('patreon-toggle').checked = false;
-                    localStorageSetItem('patreon', false);
-                });
-            })
-            
-            player.on('public', () => {
-                if(transcodeReady) {
-                    if(server) {
-                        player.src({
-                            type: "application/x-mpegURL",
-                            src: `https://${server}.angelthump.com/hls/${channel}.m3u8`
-                        })
-                    } else {
-                        player.src({
-                            type: "application/x-mpegURL",
-                            src: `https://video-cdn.angelthump.com/hls/${channel}.m3u8`
-                        })
-                    }
-                } else {
-                    if(server) {
-                        player.src({
-                            type: "application/x-mpegURL",
-                            src: `https://${server}.angelthump.com/hls/${channel}/index.m3u8`
-                        })
-                    } else {
-                        player.src({
-                            type: "application/x-mpegURL",
-                            src: `https://video-cdn.angelthump.com/hls/${channel}/index.m3u8`
-                        })
-                    }
-                }
-                player.play();
-            })
-
-            player.on('retry', () => {
-                if(patreon) {
-                    player.trigger('patreon');
-                } else {
-                    player.trigger('public');
-                }
-            })
-
-            if(patreon) {
-                player.trigger('patreon');
-            } else {
-                player.trigger('public');
-            }
-
-            let retry = () => {
-                setTimeout(function() {
-                    player.trigger('retry');
-
-                    if (requestTime < 16000) {
-                        requestTime = requestTime * 2;
-                    }
-                }, requestTime);
-            }
+  componentDidMount() {
+    const player = this.videoNode;
+    canAutoplay.video().then(function(obj) {
+      if (obj.result === true) {
+        if(JSON.parse(localStorageGetItem('player-muted'))) {
+          player.muted = true;
+        } else {
+          player.muted = false;
         }
+      }
+    });
+
+    this.UWS_CONNECT();
+    if(sessionStorageGetItem('bestRegion') === null && this.state.live) {
+      this.speedtest();
     }
 
-    componentWillUnmount() {
-        if (this.player) {
-            this.player.dispose()
+    player.poster = this.props.streamData.user.offline_banner_url;
+    player.volume = JSON.parse(localStorageGetItem('player-volume')) || 1;
+
+    player.onvolumechange = (event) => {
+      localStorageSetItem(`player-volume`, player.volume);
+      localStorageSetItem(`player-muted`, player.muted);
+    };
+
+    player.onplay = (event) => {
+      console.log(event);
+      if(this.viewCountSocket.readyState === 1) {
+        this.viewCountSocket.send(JSON.stringify({action: 'join', channel: this.props.channel}));
+      }
+    };
+
+    player.onplaying = (event) => {
+      console.log(event);
+    };
+
+    player.onpause = (event) => {
+      console.log(event);
+      if(this.viewCountSocket.readyState === 1) {
+        this.viewCountSocket.send(JSON.stringify({action: 'leave', channel: this.props.channel}));
+      }
+    };
+
+    if(!Hls.isSupported() && player.canPlayType('application/vnd.apple.mpegurl')) {
+      this.nativeHLS = true;
+      console.log('using native HLS support since MSE is not supported');
+      if(this.props.streamData.transcodeReady) {
+        player.src = `https://${this.state.server}.angelthump.com/hls/${this.props.channel}.m3u8`;
+      } else {
+        player.src = `https://${this.state.server}.angelthump.com/hls/${this.props.channel}/index.m3u8`;
+      }
+
+      player.addEventListener('loadedmetadata', function() {
+        player.play();
+      });
+
+      return;
+    }
+
+    this.nativeHLS = false;
+    console.log('MSE is supported, using MSE');
+    this.loadHLS();
+  }
+
+  UWS_CONNECT() {
+    this.viewCountSocket = new WebSocket('wss://viewer-api.angelthump.com/uws/');
+    this.viewCountSocket.onopen = () => {
+      this.viewCountSocket.send(JSON.stringify({action: 'subscribe', channel: this.props.channel}));
+      setInterval(() => {
+        this.viewCountSocket.send('{}');
+      }, 10 * 1000)
+    };
+
+    this.viewCountSocket.onmessage = (message) => {
+      const jsonObject = JSON.parse(message.data);
+      const action = jsonObject.action;
+      if(action === 'reload') {
+        window.location.reload();
+      } else if (action === 'redirect') {
+        window.location.search = `?channel=${jsonObject.punt_username}`;
+      } else if (action === 'live') {
+        console.log('socket sent live: ' + jsonObject.live);
+        if(this.state.live !== jsonObject.live) {
+          this.setState({live: jsonObject.live});
         }
+        if(jsonObject.live) {
+          this.swapEdge();
+        }
+      } else if (action === 'edge_down') {
+        console.log(`edge down: ${jsonObject.edge}`);
+        if(this.state.server === jsonObject.edge && this.state.live) {
+          this.updateEdge();
+        }
+      }
+    }
+  }
+
+  loadHLS() {
+    const player = this.videoNode;
+    this.hls = new Hls({
+      "debug": false,
+      "enableWorker": true,
+      "startLevel": 0,
+      "liveSyncDurationCount": 1,
+      "liveMaxLatencyDurationCount": 10,
+      "liveBackBufferLength": 30,
+      "defaultAudioCodec": "m4a.40.2",
+      "manifestLoadingTimeOut": 2000,
+      "fragLoadingTimeOut": 4000,
+      "levelLoadingTimeOut": 2000,
+      "startFragPrefetch": true
+    });
+    if(this.props.streamData.transcodeReady) {
+      this.hls.loadSource(`https://${this.state.server}.angelthump.com/hls/${this.props.channel}.m3u8`);
+    } else {
+      this.hls.loadSource(`https://${this.state.server}.angelthump.com/hls/${this.props.channel}/index.m3u8`);
+    }
+    this.hls.attachMedia(player);
+    this.hls.on(Hls.Events.MANIFEST_PARSED, function() {
+      player.play();
+    });
+
+    this.hls.on(Hls.Events.ERROR, function (event, data) {
+      if (data.fatal) {
+        if(this.viewCountSocket.readyState === 1) {
+          this.viewCountSocket.send(JSON.stringify({action: 'leave', channel: this.props.channel}));
+        }
+        switch(data.type) {
+          case Hls.ErrorTypes.NETWORK_ERROR:
+            console.error(`fatal network error encountered, try to recover`);
+            console.error(data);
+
+            if(data.details !== 'manifestLoadError') {
+              this.hls.startLoad();
+            } else {
+              if(this.state.live) {
+                setTimeout(() => {
+                  this.swapEdge();
+                }, 2000);
+              }
+            }
+            break;
+          case Hls.ErrorTypes.MEDIA_ERROR:
+            console.error(`fatal media error encountered, try to recover`);
+            console.error(data);
+            this.hls.recoverMediaError();
+            break;
+          default:
+            this.hls.destroy();
+            break;
+        }
+      } else {
+        console.error(data);
+      }
+    });
+  }
+
+  async updateEdge() {
+    await fetch(`https://vigor.angelthump.com/edge`, {
+      method: "POST",
+      headers: new Headers({'content-type': 'application/json'}),
+      body: JSON.stringify({
+        region: this.state.bestRegion
+      })
+    })
+    .then(response => response.json())
+    .then(response => {
+      if(this.state.server !== response.server){
+        this.setState({ server: response.server});
+        console.log(`New edge: ${response.server}`);
+        this.swapEdge();
+      }
+    })
+    .catch(() => {
+      console.error('failed to get m3u8 server and update');
+    });
+  }
+
+  swapEdge() {
+    const player = this.videoNode;
+    console.log(`swapping edge to ${this.state.server}`);
+    if(this.nativeHLS) {
+      player.src = `https://${this.state.server}.angelthump.com/hls/${this.props.channel}/index.m3u8`;
+
+      player.addEventListener('loadedmetadata', function() {
+        player.play();
+      });
+    } else {
+      //hls.loadSource(videoSrc) will work in 0.15? https://github.com/video-dev/hls.js/issues/2473
+      this.hls.destroy();
+      this.loadHLS();
+    }
+  }
+
+  async speedtest() {
+    const { continent } = this.props;
+
+    const NA_REGIONS = ['nyc3', 'sfo3', 'tor1'];
+    const EU_REGIONS = ['ams3', 'fra1', 'lon1'];
+    const ASIA_REGIONS = ['sgp1', 'blr1'];
+
+    let responseTimes = [];
+    let bestRegion;
+    if(continent === 'NA') {
+      for(let region of NA_REGIONS) {
+        const downloadStart = (new Date()).getTime();
+        await fetch(`http://speedtest-${region}.digitalocean.com/10mb.test`)
+        .then(response => response.blob())
+        .then(() => {
+          const downloadEnd = (new Date()).getTime();
+          const responseTimeMs = downloadEnd - downloadStart;
+          return responseTimes.push(responseTimeMs)
+        })
+        .catch(() => {
+          responseTimes.push('999999999999999');
+          console.error(`failed speedtest: ${region}`);
+        });
+      }
+      bestRegion = NA_REGIONS[responseTimes.indexOf(Math.min.apply(null,responseTimes))];
+      bestRegion = bestRegion.substring(0,bestRegion.length-1);
+    } else if (continent === 'EU') {
+      for(let region of EU_REGIONS) {
+        const downloadStart = (new Date()).getTime();
+        await fetch(`http://speedtest-${region}.digitalocean.com/10mb.test`)
+        .then(response => response.blob())
+        .then(() => {
+          const downloadEnd = (new Date()).getTime();
+          const responseTimeMs = downloadEnd - downloadStart;
+          return responseTimes.push(responseTimeMs)
+        })
+        .catch(() => {
+          responseTimes.push('999999999999999');
+          console.error(`failed speedtest: ${region}`);
+        });
+      }
+      bestRegion = EU_REGIONS[responseTimes.indexOf(Math.min.apply(null,responseTimes))];
+      bestRegion = bestRegion.substring(0,bestRegion.length-1);
+    } else {
+      for(let region of ASIA_REGIONS) {
+        const downloadStart = (new Date()).getTime();
+        await fetch(`http://speedtest-${region}.digitalocean.com/10mb.test`)
+        .then(response => response.blob())
+        .then(() => {
+          const downloadEnd = (new Date()).getTime();
+          const responseTimeMs = downloadEnd - downloadStart;
+          return responseTimes.push(responseTimeMs)
+        })
+        .catch(() => {
+          responseTimes.push('999999999999999');
+          console.error(`failed speedtest: ${region}`);
+        });
+      }
+      bestRegion = ASIA_REGIONS[responseTimes.indexOf(Math.min.apply(null,responseTimes))];
+      bestRegion = bestRegion.substring(0,bestRegion.length-1);
     }
 
-    render() {
-        return (
-            <div data-vjs-player>
-                <video playsInline autoPlay controls ref={ node => this.videoNode = node } className="player-video video-js vjs-has-started"></video>
-                <div id="paused-overlay" className="player-overlay player-play-overlay js-paused-overlay" style={{visibility: this.props.paused ? 'visible' : 'hidden' }}></div>
-            </div>
-        )
+    if(!this.state.server.startsWith(bestRegion)) {
+      this.setState({bestRegion: bestRegion}, () => {
+        this.updateEdge();
+      });
     }
+    sessionStorageSetItem('bestRegion', bestRegion);
+
+    console.log(responseTimes);
+    console.log(`Best region based on speedtest: ${bestRegion}`);
+  }
+  
+  componentWillUnmount() {
+    if (this.hls) {
+      this.hls.destroy();
+    }
+  }
+
+  render() {
+    return (
+      <div className="player-div">
+        <video muted autoPlay playsInline controls ref={ node => this.videoNode = node } className="player"></video>
+      </div>
+    )
+  }
 }
+
+export default Player;
